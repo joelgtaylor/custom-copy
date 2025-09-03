@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Selective Paste — POC</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-50 text-slate-900">
+  <div class="mx-auto max-w-3xl p-6 space-y-4">
+    <h1 class="text-2xl font-semibold">Selective Paste (text-only POC)</h1>
+
+    <!-- Controls -->
+    <fieldset class="bg-white rounded-2xl shadow p-4 grid grid-cols-2 sm:grid-cols-4 gap-3">
+      <legend class="font-medium mb-2">Keep on paste</legend>
+
+      <!-- toggles -->
+      <label class="flex items-center gap-2">
+        <input type="checkbox" id="keep-bold" class="accent-slate-800" checked />
+        <span>Bold</span>
+      </label>
+      <label class="flex items-center gap-2">
+        <input type="checkbox" id="keep-italic" class="accent-slate-800" checked />
+        <span>Italic</span>
+      </label>
+      <label class="flex items-center gap-2">
+        <input type="checkbox" id="keep-underline" class="accent-slate-800" />
+        <span>Underline</span>
+      </label>
+      <label class="flex items-center gap-2">
+        <input type="checkbox" id="keep-strike" class="accent-slate-800" />
+        <span>Strike</span>
+      </label>
+      <label class="flex items-center gap-2">
+        <input type="checkbox" id="keep-links" class="accent-slate-800" checked />
+        <span>Links</span>
+      </label>
+      <label class="flex items-center gap-2">
+        <input type="checkbox" id="keep-lists" class="accent-slate-800" checked />
+        <span>Lists</span>
+      </label>
+      <label class="flex items-center gap-2">
+        <input type="checkbox" id="keep-paragraphs" class="accent-slate-800" checked />
+        <span>Paragraphs</span>
+      </label>
+      <label class="flex items-center gap-2">
+        <input type="checkbox" id="keep-br" class="accent-slate-800" checked />
+        <span>Line breaks</span>
+      </label>
+    </fieldset>
+
+    <!-- Editor -->
+    <div id="editor"
+         contenteditable="true"
+         class="bg-white rounded-2xl shadow p-4 min-h-[12rem] focus:outline-none prose prose-slate max-w-none">
+      <p class="text-slate-400">Paste here…</p>
+    </div>
+
+    <div class="text-sm text-slate-500">
+      Tip: try pasting from Google Docs / Word / web pages. This POC strips styles (fonts, sizes, colors) and keeps only what you allow.
+    </div>
+  </div>
+
+  <script>
+    const editor = document.getElementById('editor');
+
+    function prefs() {
+      return {
+        bold: document.getElementById('keep-bold').checked,
+        italic: document.getElementById('keep-italic').checked,
+        underline: document.getElementById('keep-underline').checked,
+        strike: document.getElementById('keep-strike').checked,
+        links: document.getElementById('keep-links').checked,
+        lists: document.getElementById('keep-lists').checked,
+        paragraphs: document.getElementById('keep-paragraphs').checked,
+        br: document.getElementById('keep-br').checked,
+      };
+    }
+
+    editor.addEventListener('paste', (e) => {
+      e.preventDefault();
+      const html = e.clipboardData.getData('text/html');
+      const text = e.clipboardData.getData('text/plain');
+
+      const frag = html ? sanitizeHTML(html, prefs()) : document.createTextNode(text);
+      insertAtCaret(editor, frag);
+    });
+
+    function sanitizeHTML(html, p) {
+      // 1) Parse pasted HTML into a detached doc
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+      const body = doc.body;
+
+      // 2) Build allowlist dynamically from prefs
+      const allow = new Set();
+      if (p.bold) addAll(allow, ['B','STRONG']);
+      if (p.italic) addAll(allow, ['I','EM']);
+      if (p.underline) addAll(allow, ['U']);
+      if (p.strike) addAll(allow, ['S','STRIKE','DEL']);
+      if (p.links) addAll(allow, ['A']);
+      if (p.lists) addAll(allow, ['UL','OL','LI']);
+      if (p.paragraphs) addAll(allow, ['P']);
+      if (p.br) addAll(allow, ['BR']);
+      // Always allow spans (used for converting styles to semantics), and text nodes
+      addAll(allow, ['SPAN']);
+
+      // 3) Convert style-based emphasis to semantic tags
+      normalizeStyles(body);
+
+      // 4) Walk and clone with stripping
+      const outFrag = document.createDocumentFragment();
+      Array.from(body.childNodes).forEach(n => outFrag.appendChild(cleanNode(n, allow, p)));
+      return outFrag;
+    }
+
+    function addAll(set, arr){ arr.forEach(x => set.add(x)); }
+
+    function normalizeStyles(root) {
+      const els = root.querySelectorAll('*');
+      els.forEach(el => {
+        const style = (el.getAttribute('style')||'').toLowerCase();
+        if (!style) return;
+        // convert style italics/bold/underline/strike into semantic wrappers
+        const italic = /font-style\s*:\s*italic/.test(style);
+        const bold = /font-weight\s*:\s*(bold|[6-9]00)/.test(style);
+        const underline = /text-decoration\s*:[^;]*underline/.test(style);
+        const strike = /text-decoration\s*:[^;]*(line-through|strike)/.test(style);
+
+        // remove the style attribute entirely to kill fonts/sizes/colors
+        el.removeAttribute('style');
+
+        wrapIf(el, italic, 'EM');
+        wrapIf(el, bold, 'STRONG');
+        wrapIf(el, underline, 'U');
+        wrapIf(el, strike, 'S');
+      });
+    }
+
+    function wrapIf(el, cond, tag) {
+      if (!cond) return;
+      const wrapper = el.ownerDocument.createElement(tag);
+      while (el.firstChild) wrapper.appendChild(el.firstChild);
+      el.appendChild(wrapper);
+    }
+
+    function cleanNode(node, allow, p) {
+      if (node.nodeType === Node.TEXT_NODE) {
+        return document.createTextNode(node.nodeValue);
+      }
+
+      // unwrap disallowed elements but keep their children
+      const tag = node.tagName;
+      if (!allow.has(tag)) {
+        const frag = document.createDocumentFragment();
+        Array.from(node.childNodes).forEach(c => frag.appendChild(cleanNode(c, allow, p)));
+        return frag;
+      }
+
+      // create clean element
+      const clean = document.createElement(tag);
+
+      // attributes policy
+      if (tag === 'A' && p.links && node.hasAttribute('href')) {
+        const href = node.getAttribute('href');
+        try { new URL(href, location.href); clean.setAttribute('href', href); }
+        catch { /* drop invalid URLs */ }
+        clean.setAttribute('rel','noopener noreferrer');
+        clean.setAttribute('target','_blank');
+      }
+
+      // never copy inline styles or event handlers
+      Array.from(node.childNodes).forEach(c => clean.appendChild(cleanNode(c, allow, p)));
+      return clean;
+    }
+
+    // Inserts a Node/Fragment at the caret within contenteditable
+    function insertAtCaret(container, nodeOrFrag) {
+      const sel = window.getSelection();
+      if (!sel.rangeCount) {
+        container.appendChild(nodeOrFrag);
+        return;
+      }
+      const range = sel.getRangeAt(0);
+      range.deleteContents();
+
+      // place into a temporary fragment to get end marker
+      const frag = document.createDocumentFragment();
+      frag.appendChild(nodeOrFrag);
+
+      // remember last node to move caret after insert
+      let lastNode = frag.lastChild;
+      range.insertNode(frag);
+
+      // move caret after last inserted node
+      if (lastNode) {
+        range.setStartAfter(lastNode);
+        range.setEndAfter(lastNode);
+        sel.removeAllRanges();
+        sel.addRange(range);
+      }
+    }
+
+    // UX nicety: clear placeholder on first input
+    editor.addEventListener('input', () => {
+      const first = editor.firstElementChild;
+      if (first && first.textContent === 'Paste here…') editor.innerHTML = '';
+    });
+  </script>
+</body>
+</html>
